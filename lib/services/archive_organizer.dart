@@ -34,6 +34,34 @@ class ArchiveOrganizer {
   static const int _maximumPageBytes = 100 * 1024 * 1024;
   static const int _maximumArchiveBytes = 4 * 1024 * 1024 * 1024;
 
+  /// Recursively finds importable ZIP/CBZ files in a user-selected folder.
+  Future<List<File>> scanArchives(String sourcePath) async {
+    final source = Directory(sourcePath);
+    if (!source.existsSync()) {
+      throw const ArchiveImportException('找不到所选文件夹');
+    }
+
+    final files = <File>[];
+    await for (final entity in source.list(
+      recursive: true,
+      followLinks: false,
+    )) {
+      if (entity is! File) continue;
+      final relative = normalizeArchivePath(
+        p.relative(entity.path, from: source.path),
+      );
+      if (!isArchivePath(relative) || isJunkPath(relative)) continue;
+      files.add(entity);
+    }
+    files.sort(
+      (left, right) => naturalCompare(
+        normalizeArchivePath(p.relative(left.path, from: source.path)),
+        normalizeArchivePath(p.relative(right.path, from: source.path)),
+      ),
+    );
+    return files;
+  }
+
   Future<ComicBook> importArchive({
     required String sourcePath,
     required Directory libraryRoot,
@@ -284,6 +312,11 @@ class ArchiveOrganizer {
 
   static bool isWebpPath(String path) =>
       p.extension(path.replaceAll('\\', '/')).toLowerCase() == '.webp';
+
+  static bool isArchivePath(String path) {
+    final extension = p.extension(path.replaceAll('\\', '/')).toLowerCase();
+    return extension == '.zip' || extension == '.cbz';
+  }
 
   static bool isJunkPath(String path) {
     final segments = normalizeArchivePath(path).split('/');

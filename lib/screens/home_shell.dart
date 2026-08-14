@@ -267,6 +267,13 @@ class _HomeShellState extends State<HomeShell> {
               onTap: () => Navigator.pop(context, _ImportSource.archive),
             ),
             ListTile(
+              leading: const Icon(Icons.library_add_outlined),
+              title: const Text('批量导入压缩包'),
+              subtitle: const Text('选择文件夹，扫描后勾选要添加的 ZIP 或 CBZ'),
+              onTap: () =>
+                  Navigator.pop(context, _ImportSource.archiveDirectory),
+            ),
+            ListTile(
               leading: const Icon(Icons.folder_copy_outlined),
               title: const Text('漫画文件夹'),
               subtitle: const Text('递归查找 WebP，并按子文件夹分章'),
@@ -280,6 +287,8 @@ class _HomeShellState extends State<HomeShell> {
     if (source == null || !mounted) return;
     if (source == _ImportSource.archive) {
       await _pickArchive();
+    } else if (source == _ImportSource.archiveDirectory) {
+      await _pickArchiveDirectory();
     } else {
       await _pickDirectory();
     }
@@ -308,6 +317,143 @@ class _HomeShellState extends State<HomeShell> {
     await _runImport(() => widget.controller.importDirectory(path));
   }
 
+  Future<void> _pickArchiveDirectory() async {
+    if (widget.controller.isImporting) return;
+    final path = await FilePicker.platform.getDirectoryPath(
+      dialogTitle: '选择压缩包文件夹',
+      lockParentWindow: true,
+    );
+    if (path == null || !mounted) return;
+
+    List<File> archives;
+    try {
+      archives = await widget.controller.organizer.scanArchives(path);
+    } on ArchiveImportException catch (error) {
+      if (mounted) _showError(error.message);
+      return;
+    } on Object {
+      if (mounted) _showError('扫描文件夹失败，请确认文件夹仍然可访问');
+      return;
+    }
+    if (!mounted) return;
+    if (archives.isEmpty) {
+      _showError('这个文件夹里没有找到 ZIP 或 CBZ 压缩包');
+      return;
+    }
+
+    final selected = await _selectArchives(archives);
+    if (!mounted || selected == null || selected.isEmpty) return;
+    await _runBatchImport(selected);
+  }
+
+  Future<List<File>?> _selectArchives(List<File> archives) {
+    final selected = <int>{...List<int>.generate(archives.length, (i) => i)};
+    return showModalBottomSheet<List<File>>(
+      context: context,
+      isScrollControlled: true,
+      showDragHandle: true,
+      builder: (context) => StatefulBuilder(
+        builder: (context, setModalState) {
+          final allSelected = selected.length == archives.length;
+          return SafeArea(
+            child: ConstrainedBox(
+              constraints: BoxConstraints(
+                maxHeight: MediaQuery.sizeOf(context).height * .82,
+              ),
+              child: Padding(
+                padding: const EdgeInsets.fromLTRB(12, 0, 12, 16),
+                child: Column(
+                  mainAxisSize: MainAxisSize.min,
+                  children: [
+                    ListTile(
+                      title: Text('发现 ${archives.length} 个压缩包'),
+                      subtitle: const Text('选择要添加到书库的文件'),
+                      trailing: Text('${selected.length} 个已选'),
+                    ),
+                    Align(
+                      alignment: Alignment.centerLeft,
+                      child: TextButton.icon(
+                        onPressed: () => setModalState(() {
+                          if (allSelected) {
+                            selected.clear();
+                          } else {
+                            selected.addAll(
+                              List<int>.generate(archives.length, (i) => i),
+                            );
+                          }
+                        }),
+                        icon: Icon(
+                          allSelected
+                              ? Icons.remove_done
+                              : Icons.done_all_rounded,
+                        ),
+                        label: Text(allSelected ? '取消全选' : '全选'),
+                      ),
+                    ),
+                    Flexible(
+                      child: ListView.builder(
+                        shrinkWrap: true,
+                        itemCount: archives.length,
+                        itemBuilder: (context, index) {
+                          final file = archives[index];
+                          return CheckboxListTile(
+                            value: selected.contains(index),
+                            onChanged: (checked) => setModalState(() {
+                              if (checked == true) {
+                                selected.add(index);
+                              } else {
+                                selected.remove(index);
+                              }
+                            }),
+                            title: Text(
+                              p.basename(file.path),
+                              maxLines: 1,
+                              overflow: TextOverflow.ellipsis,
+                            ),
+                            subtitle: Text(
+                              p.basename(file.parent.path),
+                              maxLines: 1,
+                              overflow: TextOverflow.ellipsis,
+                            ),
+                            controlAffinity: ListTileControlAffinity.leading,
+                            contentPadding: const EdgeInsets.symmetric(
+                              horizontal: 4,
+                            ),
+                          );
+                        },
+                      ),
+                    ),
+                    const SizedBox(height: 12),
+                    SizedBox(
+                      width: double.infinity,
+                      child: FilledButton.icon(
+                        onPressed: selected.isEmpty
+                            ? null
+                            : () => Navigator.pop(
+                                context,
+                                archives
+                                    .asMap()
+                                    .entries
+                                    .where(
+                                      (entry) => selected.contains(entry.key),
+                                    )
+                                    .map((entry) => entry.value)
+                                    .toList(),
+                              ),
+                        icon: const Icon(Icons.download_rounded),
+                        label: Text('添加 ${selected.length} 个压缩包'),
+                      ),
+                    ),
+                  ],
+                ),
+              ),
+            ),
+          );
+        },
+      ),
+    );
+  }
+
   Future<void> _runImport(Future<ComicBook> Function() import) async {
     showModalBottomSheet<void>(
       context: context,
@@ -331,6 +477,69 @@ class _HomeShellState extends State<HomeShell> {
       Navigator.of(context).pop();
       _showError('导入没有完成，请确认压缩包未损坏且空间充足');
     }
+  }
+
+  Future<void> _runBatchImport(List<File> archives) async {
+    final progress = ValueNotifier<_BatchImportStatus>(
+      _BatchImportStatus(total: archives.length),
+    );
+    showModalBottomSheet<void>(
+      context: context,
+      isDismissible: false,
+      enableDrag: false,
+      builder: (context) => _BatchImportProgressSheet(
+        controller: widget.controller,
+        progress: progress,
+      ),
+    );
+
+    final imported = <ComicBook>[];
+    final failures = <String>[];
+    try {
+      for (var index = 0; index < archives.length; index++) {
+        if (!mounted) break;
+        final archive = archives[index];
+        progress.value = progress.value.copyWith(
+          completed: progress.value.completed,
+          currentIndex: index,
+          currentName: p.basename(archive.path),
+          failureCount: progress.value.failureCount,
+        );
+        try {
+          imported.add(await widget.controller.importArchive(archive.path));
+        } on ArchiveImportException catch (error) {
+          failures.add('${p.basename(archive.path)}：${error.message}');
+        } on Object {
+          failures.add('${p.basename(archive.path)}：导入失败');
+        }
+        progress.value = progress.value.copyWith(
+          completed: index + 1,
+          currentIndex: index + 1,
+          currentName: null,
+          failureCount: failures.length,
+        );
+      }
+      if (mounted) {
+        progress.value = progress.value.copyWith(
+          completed: archives.length,
+          currentIndex: archives.length,
+          currentName: null,
+          failureCount: failures.length,
+        );
+        Navigator.of(context).pop();
+      }
+    } finally {
+      progress.dispose();
+    }
+
+    if (!mounted) return;
+    final failedCount = failures.length;
+    final message = failedCount == 0
+        ? '批量导入完成，已添加 ${imported.length} 个压缩包'
+        : '批量导入完成：成功 ${imported.length} 个，失败 $failedCount 个';
+    ScaffoldMessenger.of(context).showSnackBar(
+      SnackBar(content: Text(message), behavior: SnackBarBehavior.floating),
+    );
   }
 
   void _showError(String message) {
@@ -394,7 +603,7 @@ class _HomeShellState extends State<HomeShell> {
 
 enum _SelectionAction { toggleTitle, toggleCover, move }
 
-enum _ImportSource { archive, directory }
+enum _ImportSource { archive, archiveDirectory, directory }
 
 class _LibraryPage extends StatelessWidget {
   const _LibraryPage({
@@ -1127,6 +1336,133 @@ class _ImportProgressSheet extends StatelessWidget {
       );
     },
   );
+}
+
+class _BatchImportStatus {
+  const _BatchImportStatus({required this.total})
+    : completed = 0,
+      currentIndex = 0,
+      currentName = null,
+      failureCount = 0;
+
+  final int total;
+  final int completed;
+  final int currentIndex;
+  final String? currentName;
+  final int failureCount;
+
+  const _BatchImportStatus._({
+    required this.total,
+    required this.completed,
+    required this.currentIndex,
+    required this.currentName,
+    required this.failureCount,
+  });
+
+  bool get isDone => completed >= total;
+
+  _BatchImportStatus copyWith({
+    required int completed,
+    required int currentIndex,
+    required String? currentName,
+    required int failureCount,
+  }) {
+    return _BatchImportStatus._(
+      total: total,
+      completed: completed,
+      currentIndex: currentIndex,
+      currentName: currentName,
+      failureCount: failureCount,
+    );
+  }
+}
+
+class _BatchImportProgressSheet extends StatelessWidget {
+  const _BatchImportProgressSheet({
+    required this.controller,
+    required this.progress,
+  });
+
+  final AppController controller;
+  final ValueNotifier<_BatchImportStatus> progress;
+
+  @override
+  Widget build(BuildContext context) {
+    return ListenableBuilder(
+      listenable: controller,
+      builder: (context, _) => ValueListenableBuilder<_BatchImportStatus>(
+        valueListenable: progress,
+        builder: (context, status, _) {
+          final pageProgress = controller.importProgress?.value ?? 0;
+          final totalProgress = status.total == 0
+              ? 1.0
+              : ((status.completed + (status.isDone ? 0 : pageProgress)) /
+                        status.total)
+                    .clamp(0.0, 1.0)
+                    .toDouble();
+          return PopScope(
+            canPop: status.isDone,
+            child: Padding(
+              padding: const EdgeInsets.fromLTRB(24, 12, 24, 36),
+              child: Column(
+                mainAxisSize: MainAxisSize.min,
+                crossAxisAlignment: CrossAxisAlignment.start,
+                children: [
+                  Row(
+                    children: [
+                      Icon(
+                        status.isDone
+                            ? Icons.check_circle_rounded
+                            : Icons.auto_awesome_rounded,
+                      ),
+                      const SizedBox(width: 12),
+                      Text(
+                        status.isDone ? '批量整理完成' : '正在批量整理',
+                        style: Theme.of(context).textTheme.titleLarge,
+                      ),
+                    ],
+                  ),
+                  const SizedBox(height: 26),
+                  LinearProgressIndicator(
+                    value: totalProgress,
+                    minHeight: 8,
+                    borderRadius: BorderRadius.circular(4),
+                  ),
+                  const SizedBox(height: 16),
+                  Text(
+                    status.isDone
+                        ? '已处理 ${status.total} 个压缩包'
+                        : '正在添加第 ${status.currentIndex + 1} / ${status.total} 个',
+                  ),
+                  if (status.currentName != null) ...[
+                    const SizedBox(height: 6),
+                    Text(
+                      status.currentName!,
+                      maxLines: 1,
+                      overflow: TextOverflow.ellipsis,
+                      style: Theme.of(context).textTheme.bodyMedium,
+                    ),
+                  ],
+                  if (!status.isDone && controller.importProgress != null) ...[
+                    const SizedBox(height: 6),
+                    Text(
+                      controller.importProgress!.label,
+                      maxLines: 1,
+                      overflow: TextOverflow.ellipsis,
+                    ),
+                  ],
+                  if (status.failureCount > 0) ...[
+                    const SizedBox(height: 6),
+                    Text('已跳过 ${status.failureCount} 个失败文件'),
+                  ],
+                ],
+              ),
+            ),
+          );
+        },
+      ),
+    );
+  }
 }
 
 class _SettingsPage extends StatelessWidget {

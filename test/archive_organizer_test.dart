@@ -2,6 +2,7 @@ import 'dart:io';
 
 import 'package:archive/archive.dart';
 import 'package:flutter_test/flutter_test.dart';
+import 'package:path/path.dart' as p;
 import 'package:panelly/services/archive_organizer.dart';
 
 void main() {
@@ -49,8 +50,31 @@ void main() {
     test('detects WebP case-insensitively and ignores junk paths', () {
       expect(ArchiveOrganizer.isWebpPath('Chapter/001.WEBP'), isTrue);
       expect(ArchiveOrganizer.isWebpPath('Chapter/001.jpg'), isFalse);
+      expect(ArchiveOrganizer.isArchivePath('Chapter/001.CBZ'), isTrue);
+      expect(ArchiveOrganizer.isArchivePath('Chapter/001.rar'), isFalse);
       expect(ArchiveOrganizer.isJunkPath('__MACOSX/001.webp'), isTrue);
       expect(ArchiveOrganizer.isJunkPath('Chapter/.cover.webp'), isTrue);
+    });
+
+    test('scans nested ZIP and CBZ files in natural order', () async {
+      final temporaryRoot = Directory('build/test_tmp')
+        ..createSync(recursive: true);
+      final temporary = await temporaryRoot.createTemp('panelly_scan_test_');
+      addTearDown(() => temporary.delete(recursive: true));
+      final nested = Directory('${temporary.path}/nested')..createSync();
+      final hidden = Directory('${temporary.path}/.hidden')..createSync();
+      await File('${temporary.path}/10.cbz').writeAsBytes(<int>[1]);
+      await File('${temporary.path}/2.zip').writeAsBytes(<int>[2]);
+      await File('${nested.path}/3.ZIP').writeAsBytes(<int>[3]);
+      await File('${hidden.path}/1.zip').writeAsBytes(<int>[4]);
+      await File('${temporary.path}/notes.rar').writeAsBytes(<int>[5]);
+
+      final result = await ArchiveOrganizer().scanArchives(temporary.path);
+
+      expect(
+        result.map((file) => file.path.substring(temporary.path.length + 1)),
+        <String>['2.zip', '10.cbz', p.join('nested', '3.ZIP')],
+      );
     });
 
     test('imports and reorganizes a real ZIP archive', () async {
