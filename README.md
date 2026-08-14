@@ -5,6 +5,7 @@
 ## 已实现功能
 
 - **导入漫画压缩包**：支持 ZIP、CBZ，自动解压并整理其中的 WebP 页面。
+- **从其他应用打开**：支持在 QQ 等应用中用漫匣打开或分享 ZIP、CBZ，收到后自动进入整理流程。
 - **导入漫画文件夹**：递归扫描文件夹中的 WebP 文件，并根据子文件夹自动分章。
 - **自然排序**：按照漫画常见的数字编号排序，例如 `2.webp` 会排在 `10.webp` 前面。
 - **自动分章**：根据压缩包目录或文件夹层级识别章节，正文页面会优先排列。
@@ -57,6 +58,17 @@ flutter test
 build/app/outputs/flutter-apk/app-arm64-v8a-release.apk
 ```
 
+## 通过 storage.to 分享 APK
+
+Windows PowerShell 可直接调用 storage.to 接口上传，不需要打开浏览器：
+
+```powershell
+.\scripts\upload-storage-to.ps1 .\build\app\outputs\flutter-apk\app-arm64-v8a-release.apk
+```
+
+脚本使用匿名访问令牌和预签名上传，完成后输出分享链接。设置环境变量
+`STORAGE_TO_VISITOR_TOKEN` 可以在后续上传中保留文件管理归属。
+
 ## 项目结构
 
 ```text
@@ -71,6 +83,10 @@ lib/
   widgets/comic_cover.dart         封面和隐私显示
 test/                               单元、组件和视觉测试
 ```
+
+## 设计调研
+
+- [开源漫画阅读器调研与取舍](docs/opensource-research.md)
 
 ## 开源状态
 

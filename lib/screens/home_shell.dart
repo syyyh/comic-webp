@@ -1,17 +1,28 @@
+import 'dart:async';
+import 'dart:collection';
+import 'dart:io';
+
 import 'package:file_picker/file_picker.dart';
 import 'package:flutter/material.dart';
+import 'package:path/path.dart' as p;
 
 import '../app_controller.dart';
 import '../models/comic_book.dart';
 import '../models/library_folder.dart';
 import '../services/archive_organizer.dart';
+import '../services/incoming_archive_service.dart';
 import '../widgets/comic_cover.dart';
 import 'comic_detail_screen.dart';
 
 class HomeShell extends StatefulWidget {
-  const HomeShell({super.key, required this.controller});
+  const HomeShell({
+    super.key,
+    required this.controller,
+    this.incomingArchiveSource,
+  });
 
   final AppController controller;
+  final IncomingArchiveSource? incomingArchiveSource;
 
   @override
   State<HomeShell> createState() => _HomeShellState();
@@ -20,8 +31,34 @@ class HomeShell extends StatefulWidget {
 class _HomeShellState extends State<HomeShell> {
   int _selectedIndex = 0;
   final _selectedBooks = <String>{};
+  final _incomingEvents = Queue<IncomingArchiveEvent>();
+  late final IncomingArchiveSource _incomingArchiveSource;
+  late final bool _ownsIncomingArchiveSource;
+  StreamSubscription<IncomingArchiveEvent>? _incomingSubscription;
+  bool _processingIncomingEvents = false;
 
   bool get _isSelecting => _selectedBooks.isNotEmpty;
+
+  @override
+  void initState() {
+    super.initState();
+    _ownsIncomingArchiveSource = widget.incomingArchiveSource == null;
+    _incomingArchiveSource =
+        widget.incomingArchiveSource ?? IncomingArchiveService();
+    _incomingSubscription = _incomingArchiveSource.events.listen(
+      _enqueueIncomingEvent,
+    );
+    unawaited(_incomingArchiveSource.start());
+  }
+
+  @override
+  void dispose() {
+    unawaited(_incomingSubscription?.cancel());
+    if (_ownsIncomingArchiveSource) {
+      unawaited(_incomingArchiveSource.dispose());
+    }
+    super.dispose();
+  }
 
   @override
   Widget build(BuildContext context) {
@@ -300,6 +337,58 @@ class _HomeShellState extends State<HomeShell> {
     ScaffoldMessenger.of(context).showSnackBar(
       SnackBar(content: Text(message), behavior: SnackBarBehavior.floating),
     );
+  }
+
+  void _enqueueIncomingEvent(IncomingArchiveEvent event) {
+    _incomingEvents.add(event);
+    _scheduleIncomingProcessing();
+  }
+
+  void _scheduleIncomingProcessing() {
+    WidgetsBinding.instance.addPostFrameCallback((_) {
+      if (mounted) unawaited(_processIncomingEvents());
+    });
+  }
+
+  Future<void> _processIncomingEvents() async {
+    if (_processingIncomingEvents || !mounted) return;
+    _processingIncomingEvents = true;
+    try {
+      while (_incomingEvents.isNotEmpty && mounted) {
+        final event = _incomingEvents.removeFirst();
+        if (event is IncomingArchiveFailure) {
+          _showError(event.message);
+          continue;
+        }
+        if (event is! IncomingArchiveReady) continue;
+
+        while (widget.controller.isImporting && mounted) {
+          await Future<void>.delayed(const Duration(milliseconds: 150));
+        }
+        if (!mounted) return;
+
+        try {
+          await _runImport(() => widget.controller.importArchive(event.path));
+        } finally {
+          final temporary = File(event.path);
+          try {
+            if (temporary.existsSync()) temporary.deleteSync();
+            final parent = temporary.parent;
+            if (p.basename(parent.parent.path) == 'incoming_archives' &&
+                parent.existsSync()) {
+              parent.deleteSync();
+            }
+          } on FileSystemException {
+            // The cache directory can safely clean up a locked file later.
+          }
+        }
+      }
+    } finally {
+      _processingIncomingEvents = false;
+      if (_incomingEvents.isNotEmpty && mounted) {
+        _scheduleIncomingProcessing();
+      }
+    }
   }
 }
 
