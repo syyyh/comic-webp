@@ -30,7 +30,6 @@ class _ReaderScreenState extends State<ReaderScreen> {
   late int _currentPage;
   late ReadingMode _readingMode;
   bool _showControls = true;
-  bool _didInitialContinuousScroll = false;
   int _preloadedCenter = -1;
 
   @override
@@ -60,16 +59,6 @@ class _ReaderScreenState extends State<ReaderScreen> {
     final book = widget.controller.latestVersionOf(widget.book);
     final pages = book.pages;
     _preloadAround(book, pages);
-    if (_readingMode == ReadingMode.continuous &&
-        !_didInitialContinuousScroll) {
-      WidgetsBinding.instance.addPostFrameCallback((_) {
-        if (!mounted || _didInitialContinuousScroll || pages.isEmpty) return;
-        if (_continuousController.isAttached && _currentPage > 0) {
-          _continuousController.jumpTo(index: _currentPage);
-        }
-        _didInitialContinuousScroll = true;
-      });
-    }
 
     return PopScope(
       onPopInvokedWithResult: (didPop, result) {
@@ -123,6 +112,7 @@ class _ReaderScreenState extends State<ReaderScreen> {
         key: const ValueKey('continuous-reader'),
         itemScrollController: _continuousController,
         itemPositionsListener: _continuousPositions,
+        initialScrollIndex: _currentPage,
         itemCount: pages.length,
         itemBuilder: (context, index) => _ReaderImage(
           path: widget.controller.pagePath(book, pages[index]),
@@ -236,7 +226,6 @@ class _ReaderScreenState extends State<ReaderScreen> {
     await widget.controller.updateReadingMode(book, mode);
     setState(() {
       _readingMode = mode;
-      _didInitialContinuousScroll = false;
     });
     if (mode != ReadingMode.continuous) {
       WidgetsBinding.instance.addPostFrameCallback((_) {
